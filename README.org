@@ -1,0 +1,144 @@
+#+TITLE: @0k/pdfjs-legacy-runtime
+#+AUTHOR: Valentin Lab
+
+A shared PDF.js compatibility boundary for applications that must run
+on old Android WebViews: the exact pin, the =legacy/= import, worker
+resolution, retry-on-rejected-load and single-owner teardown, *stated
+once*.
+
+* What this is
+
+Not a utility — a *policy*. Five rules that every consuming application
+must obey identically, because they may render different documents for
+different readers but do it on the same engine on the same device:
+
+1. =pdfjs-dist= is EXACTLY =3.11.174=;
+2. the =legacy/= build is loaded, never the default one;
+3. the worker is resolved as a build-emitted asset URL;
+4. a REJECTED load is not memoised, so a retry can succeed;
+5. teardown has exactly ONE owner.
+
+Copied into each application instead, these rules *diverge*: a copy
+that memoises a rejected load unconditionally makes a transient import
+failure permanent for the life of the page. Nothing fails, because
+nothing checks.
+
+It also forces ~isEvalSupported: false~ on every document it loads
+(see *Security*).
+
+* ⚠ Why the pin is not negotiable
+
+Android System WebView 91 (the SM-N910C test device) runs a V8 that
+cannot parse two constructs later PDF.js emits *even in its =legacy/=
+bundle*: ES2022 class static-init blocks (~static { … }~) and ES2024
+~Promise.withResolvers()~. On device a v6 legacy worker fails with
+~Setting up fake worker failed: Unexpected token '{'~.
+
+The reader is then shown a blank rectangle where the document should
+be — the failure is silent in the worst possible way.
+
+Two checks hold the pin:
+
+- =pdfjs-dist= is an EXACT dependency of this package, so the copy it
+  imports is =3.11.174= whatever else the application installs.
+  ~test/compat.test.ts~ checks the declaration stays exact.
+- The same test *scans the installed bundles* for both constructs — a
+  version number is a label, the bytes are the fact.
+
+* Install
+
+#+begin_src sh
+npm install @0k/pdfjs-legacy-runtime
+#+end_src
+
+=pdfjs-dist= =3.11.174= comes with it. The application's bundler must
+handle ~new URL("<package path>", import.meta.url)~ by resolving the
+package path as a module and emitting the file as an asset (Vite and
+webpack 5 do); under plain URL rules that string resolves next to the
+importing chunk instead.
+
+* Usage
+
+#+begin_src typescript
+import { loadPdfRuntime, type PdfLoadingTask } from '@0k/pdfjs-legacy-runtime';
+
+const runtime = await loadPdfRuntime();   // imports PDF.js on first call
+const task: PdfLoadingTask = runtime.getDocument({
+  url: 'document.pdf',
+  disableAutoFetch: true,                 // with disableStream: fetch
+  disableStream: true,                    // only what the page needs
+});
+const doc = await task.promise;
+const page = await doc.getPage(1);
+const viewport = page.getViewport({ scale: 1.5 });
+
+const canvas = document.createElement('canvas');
+canvas.width = viewport.width;
+canvas.height = viewport.height;
+const render = page.render({ canvasContext: canvas.getContext('2d')!, viewport });
+await render.promise;                     // render.cancel() aborts it
+
+page.cleanup();
+await task.destroy();                     // the ONLY teardown: network + worker
+#+end_src
+
+- Keep the loading task for the life of the document: its ~destroy()~
+  is the only way to release the worker. ~PdfDocument~ has no
+  ~destroy()~, on purpose.
+- If ~loadPdfRuntime()~ rejects (a chunk that did not arrive), call it
+  again: a failed import is not cached.
+- For large files, serve the URL with ~Range~ support and pass
+  ~disableAutoFetch~ and ~disableStream~ as above: PDF.js then fetches
+  the cross-reference table and the pages shown, not the whole body.
+
+* API
+
+| Export                          | What it is                                                                 |
+|---------------------------------+----------------------------------------------------------------------------|
+| ~loadPdfRuntime()~              | ~Promise<PdfRuntime>~; imports the legacy build once, wires the worker     |
+| ~PdfRuntime.getDocument(p)~     | starts a load; forwards ~p~ with ~isEvalSupported: false~ added            |
+| ~PdfGetDocumentParams~          | ~url~, ~disableAutoFetch~, ~disableStream~, ~disableRange~                 |
+| ~PdfLoadingTask~                | ~promise~ (the document), ~destroy()~ (network + worker)                   |
+| ~PdfDocument~                   | ~numPages~, ~getPage(n)~                                                   |
+| ~PdfPage~                       | ~getViewport({scale})~, ~render(params)~, ~cleanup()~                      |
+| ~PdfRenderParams~               | ~canvasContext~, ~viewport~, optional ~transform~ (device-pixel-ratio)     |
+| ~PdfRenderTask~                 | ~promise~, ~cancel()~                                                      |
+| ~__setPdfRuntimeForTest(r)~     | for the application's tests: inject a runtime or a promise of one, or reset the memo with ~null~ |
+
+* Security
+
+=pdfjs-dist= =3.11.174= is affected by CVE-2024-4367
+(GHSA-wgrm-67xf-hhpq): with ~isEvalSupported~ at its default ~true~, a
+crafted font in a PDF runs JavaScript in the page's origin. The fix
+(4.2.67) is out of reach of the pin, so this package applies the
+advisory's workaround itself: ~getDocument~ always passes
+~isEvalSupported: false~, after the caller's options. Glyph outlines
+are then interpreted instead of compiled: slower, same output.
+
+A Content-Security-Policy without ~'unsafe-eval'~ is a useful second
+layer. Expect =npm audit= in an application to keep reporting this
+advisory, and advisories against =tar=, pulled in by =pdfjs-dist='s
+optional =canvas= dependency: =tar= only runs at install time
+(=canvas= builds a Node.js renderer) and never reaches the browser
+bundle.
+
+* Development
+
+#+begin_src sh
+npm run check            # tsc --noEmit, build dist/, vitest run
+#+end_src
+
+Releases are published to npm from a git tag. To try an unreleased
+change in an application, link this checkout there (=npm link=) rather
+than bumping the version. The application imports ~dist/~, so run
+~npm run build~ here after each change.
+
+* Layout
+
+| Path                                | Holds                                                     |
+|-------------------------------------+-----------------------------------------------------------|
+| ~src/index.ts~                      | the whole boundary; built by ~tsc~ into ~dist/~           |
+| ~test/compat.test.ts~               | the pin + a syntax scan of the installed bundles          |
+| ~test/runtime.test.ts~              | the real loader (import mocked) and the test seam         |
+| ~test/dist.test.ts~                 | ~dist/index.js~ keeps the import and the worker URL as is |
+| ~test/teardown-ownership.test-d.ts~ | rule 5, as a compile error                                |

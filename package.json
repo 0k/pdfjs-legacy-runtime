@@ -1,0 +1,37 @@
+{
+  "name": "@0k/pdfjs-legacy-runtime",
+  "version": "0.1.0",
+  "description": "A shared PDF.js 3.11.174 legacy-runtime compatibility boundary: the exact pin, the legacy import, worker resolution, retry-on-rejected-load and single-owner teardown, stated once.",
+  "license": "MIT",
+  "author": "Valentin Lab <valentin.lab@kalysto.org>",
+  "type": "module",
+  "sideEffects": false,
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.org",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run build && npm run test"
+  },
+  "dependencies": {
+    "pdfjs-dist": "3.11.174"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "typescript": "5.7.3",
+    "vitest": "5.0.3"
+  }
+}
