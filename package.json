@@ -1,9 +1,28 @@
 {
   "name": "@0k/pdfjs-legacy-runtime",
-  "version": "0.1.0",
+  "version": "%%version%%",
   "description": "A shared PDF.js 3.11.174 legacy-runtime compatibility boundary: the exact pin, the legacy import, worker resolution, retry-on-rejected-load and single-owner teardown, stated once.",
-  "license": "MIT",
+  "keywords": [
+    "pdf",
+    "pdfjs",
+    "pdfjs-dist",
+    "legacy",
+    "android",
+    "webview"
+  ],
   "author": "Valentin Lab <valentin.lab@kalysto.org>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0k/pdfjs-legacy-runtime.git"
+  },
+  "homepage": "https://github.com/0k/pdfjs-legacy-runtime",
+  "bugs": {
+    "url": "https://github.com/0k/pdfjs-legacy-runtime/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "sideEffects": false,
   "types": "./dist/index.d.ts",
@@ -15,7 +34,7 @@
   },
   "files": [
     "dist",
-    "README.org",
+    "README.md",
     "LICENSE"
   ],
   "scripts": {

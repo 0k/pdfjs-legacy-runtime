@@ -1,0 +1,6 @@
+NAME="@0k/pdfjs-legacy-runtime"
+DESCRIPTION="A shared PDF.js 3.11.174 legacy-runtime compatibility boundary: the exact pin, the legacy import, worker resolution, retry-on-rejected-load and single-owner teardown, stated once."
+EMAIL="valentin.lab@kalysto.org"
+AUTHOR="Valentin Lab"
+AUTHOR_EMAIL="$AUTHOR <$EMAIL>"
+FILES="package.json package-lock.json"
