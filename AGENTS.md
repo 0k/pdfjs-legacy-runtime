@@ -17,6 +17,12 @@ One PDF.js compatibility policy for every consumer (see `README.org`).
   own chunk (`test/dist.test.ts`).  Never add a bundling step that
   rewrites them.
 - Verify with `npm run check` (typecheck, build, tests).
+- Each loading task owns a dedicated `PDFWorker`; never expose a caller
+  worker option or document-level teardown. `destroy()` must resolve only
+  once the worker thread has stopped, including cancellation during startup.
+  On transport teardown failure, still destroy and await the worker before
+  rethrowing the original error. A worker script that never loads nor errors
+  keeps `destroy()` pending; do not replace this guarantee with a timeout.
 
 ## Delivery
 

@@ -39,17 +39,34 @@ afterEach(() => {
 
 const LEGACY = "pdfjs-dist/legacy/build/pdf.js";
 
+function deferred() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 /** A stand-in for the legacy PDF.js module, recording what it is given. */
-function fakePdfjs() {
+function fakePdfjs(workerReady = Promise.resolve()) {
   const task = {
     promise: Promise.resolve({ numPages: 1, getPage: async () => null }),
-    destroy: async () => undefined,
+    destroy: vi.fn(async (): Promise<void> => undefined),
   };
+  const workers: { promise: Promise<void>; destroy: ReturnType<typeof vi.fn> }[] = [];
   return {
     task,
+    workers,
     module: {
       GlobalWorkerOptions: { workerSrc: "" },
       getDocument: vi.fn((_params: Record<string, unknown>) => task),
+      PDFWorker: vi.fn(function () {
+        const worker = { promise: workerReady, destroy: vi.fn() };
+        workers.push(worker);
+        return worker;
+      }),
     },
   };
 }
@@ -88,7 +105,9 @@ describe("the real loader", () => {
     vi.doMock(LEGACY, () => pdfjs.module);
 
     const runtime = await loadPdfRuntime();
-    expect(runtime.getDocument({ url: "u" })).toBe(pdfjs.task);
+    const task = runtime.getDocument({ url: "u" });
+    expect(task.promise).toBe(pdfjs.task.promise);
+    await task.destroy();
     // ...and the successful load IS memoised.
     expect(loadPdfRuntime()).toBe(loadPdfRuntime());
   });
@@ -111,13 +130,18 @@ describe("the real loader", () => {
     vi.doMock(LEGACY, () => pdfjs.module);
 
     const runtime = await loadPdfRuntime();
-    runtime.getDocument({
+    const first = runtime.getDocument({
       url: "document.pdf",
       disableAutoFetch: true,
       disableStream: true,
     });
     // A caller smuggling the flag through an untyped object cannot win.
-    runtime.getDocument({ url: "x", isEvalSupported: true } as never);
+    const second = runtime.getDocument({ url: "x", isEvalSupported: true } as never);
+
+    await first.destroy();
+    await second.destroy();
+    expect(pdfjs.workers).toHaveLength(2);
+    expect(pdfjs.workers[0]).not.toBe(pdfjs.workers[1]);
 
     expect(pdfjs.module.getDocument.mock.calls).toEqual([
       [
@@ -125,11 +149,124 @@ describe("the real loader", () => {
           url: "document.pdf",
           disableAutoFetch: true,
           disableStream: true,
+          worker: pdfjs.workers[0],
           isEvalSupported: false,
         },
       ],
-      [{ url: "x", isEvalSupported: false }],
+      [{ url: "x", worker: pdfjs.workers[1], isEvalSupported: false }],
     ]);
+  });
+
+  it("destroys the dedicated worker and rethrows the same synchronous getDocument error", async () => {
+    const error = new Error("Invalid parameter object: need either .data, .range or .url");
+    // Like PDF.js 3.11: destroying a starting worker rejects its promise
+    // once the thread is stopped, with nobody else listening.
+    const starting = deferred();
+    const pdfjs = fakePdfjs(starting.promise);
+    pdfjs.module.getDocument.mockImplementation(() => {
+      throw error;
+    });
+    pdfjs.module.PDFWorker.mockImplementation(function () {
+      const worker = {
+        promise: starting.promise,
+        destroy: vi.fn(() => starting.reject(new Error("Worker was destroyed"))),
+      };
+      pdfjs.workers.push(worker);
+      return worker;
+    });
+    vi.doMock(LEGACY, () => pdfjs.module);
+    const runtime = await loadPdfRuntime();
+
+    let thrown: unknown;
+    try {
+      runtime.getDocument({ url: "" });
+    } catch (reason) {
+      thrown = reason;
+    }
+
+    expect(thrown).toBe(error);
+    expect(pdfjs.workers).toHaveLength(1);
+    expect(pdfjs.workers[0]?.destroy).toHaveBeenCalledOnce();
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "keeps destroy pending until a starting worker's promise settles (%s)",
+    async (settlement) => {
+      const ready = deferred();
+      const pdfjs = fakePdfjs(ready.promise);
+      vi.doMock(LEGACY, () => pdfjs.module);
+      const runtime = await loadPdfRuntime();
+      const task = runtime.getDocument({ url: "document.pdf" });
+      let settled = false;
+      const destroying = task.destroy().then(() => {
+        settled = true;
+      });
+
+      try {
+        await vi.waitFor(() => expect(pdfjs.task.destroy).toHaveBeenCalledOnce());
+        // Drain the transport continuation without relying on a wall-clock delay.
+        await Promise.resolve();
+        expect(settled).toBe(false);
+        expect(pdfjs.workers[0]?.destroy).toHaveBeenCalledOnce();
+      } finally {
+        // A readiness rejection is expected when PDF.js cancels startup.
+        if (settlement === "reject" && pdfjs.workers.length) {
+          ready.reject(new Error("Worker was destroyed"));
+        } else {
+          ready.resolve();
+        }
+        await destroying;
+      }
+      expect(settled).toBe(true);
+    },
+  );
+
+  it("destroys an already-ready worker after transport teardown and before resolving", async () => {
+    const transport = deferred();
+    const pdfjs = fakePdfjs();
+    pdfjs.task.destroy.mockImplementation(() => transport.promise);
+    vi.doMock(LEGACY, () => pdfjs.module);
+    const runtime = await loadPdfRuntime();
+    const task = runtime.getDocument({ url: "document.pdf" });
+    const destroying = task.destroy();
+    try {
+      expect(pdfjs.workers[0]?.destroy).not.toHaveBeenCalled();
+    } finally {
+      transport.resolve();
+      await destroying;
+    }
+    expect(pdfjs.workers[0]?.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("finishes worker teardown before rethrowing the original transport error", async () => {
+    const ready = deferred();
+    const error = new Error("transport teardown failed");
+    const pdfjs = fakePdfjs(ready.promise);
+    pdfjs.task.destroy.mockRejectedValue(error);
+    vi.doMock(LEGACY, () => pdfjs.module);
+    const runtime = await loadPdfRuntime();
+    const task = runtime.getDocument({ url: "document.pdf" });
+    let settled = false;
+    const destroying = task.destroy().then(
+      () => {
+        settled = true;
+        return undefined;
+      },
+      (reason: unknown) => {
+        settled = true;
+        return reason;
+      },
+    );
+    try {
+      await vi.waitFor(() => expect(pdfjs.task.destroy).toHaveBeenCalledOnce());
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(pdfjs.workers[0]?.destroy).toHaveBeenCalledOnce();
+    } finally {
+      if (pdfjs.workers.length) ready.reject(new Error("Worker was destroyed"));
+      else ready.resolve();
+      expect(await destroying).toBe(error);
+    }
   });
 });
 

@@ -85,14 +85,14 @@ export interface PdfPage {
  *
  * ⚠ **`destroy()` is deliberately ABSENT, and that absence is the
  * contract.** Teardown of network / transport / worker is owned SOLELY
- * by the {@link PdfLoadingTask}, whose `destroy()` "aborts all network
- * requests and destroys the worker" per v3.11.174's `api.d.ts`. The
- * real v3 `PDFDocumentProxy` also exposes a `destroy` that terminates
- * the same worker, so a codebase calling both has two teardown paths
- * for one resource and no compiler able to say so.
+ * by the {@link PdfLoadingTask} wrapper, whose `destroy()` stops the
+ * dedicated worker as well as the underlying loading task. The real v3
+ * `PDFDocumentProxy.destroy()` only delegates to that underlying task,
+ * which skips a supplied worker: document-level teardown would leave
+ * our dedicated worker running.
  *
  * Omitting it here makes `doc.destroy()` a COMPILE ERROR rather than a
- * second, redundant path. Destroy the loading task instead.
+ * second, incomplete path. Destroy the loading task instead.
  */
 export interface PdfDocument {
   readonly numPages: number;
@@ -106,6 +106,8 @@ export interface PdfDocument {
  * is the SOLE owner of document/transport cleanup. Holding the task
  * for the lifetime of the document is therefore not bookkeeping: it is
  * how a consumer retains the ability to release the worker at all.
+ * It settles only once the worker thread has stopped, even when destroyed
+ * during startup. A worker script that never loads nor errors keeps it pending.
  */
 export interface PdfLoadingTask {
   readonly promise: Promise<PdfDocument>;
@@ -170,11 +172,11 @@ export function loadPdfRuntime(): Promise<PdfRuntime> {
     // The LEGACY build. In pdfjs-dist 3.11.174 it is a UMD bundle
     // (`module.exports = pdfjsLib`, no ESM default) whose
     // `legacy/build/pdf.d.ts` re-exports the root package's
-    // `types/src/pdf.d.ts` — so `getDocument` and `GlobalWorkerOptions`
-    // arrive as TYPED NAMED exports on the dynamic-import namespace,
+    // `types/src/pdf.d.ts` — so `getDocument`, `PDFWorker` and
+    // `GlobalWorkerOptions` arrive as TYPED NAMED exports on the import namespace,
     // both at type-check time and (via the bundler's CJS interop that
     // lifts `module.exports` properties to named exports) at runtime.
-    const { getDocument, GlobalWorkerOptions } = await import(
+    const { getDocument, PDFWorker, GlobalWorkerOptions } = await import(
       "pdfjs-dist/legacy/build/pdf.js"
     );
     // `.min.js` keeps the shipped worker small; it comes from the SAME
@@ -184,13 +186,39 @@ export function loadPdfRuntime(): Promise<PdfRuntime> {
       import.meta.url,
     ).toString();
     GlobalWorkerOptions.workerSrc = workerUrl;
-    // The real `getDocument` returns a `PDFDocumentLoadingTask` that is
-    // a structural SUPERSET of `PdfLoadingTask`, so this is a plain,
-    // checked assignment. `isEvalSupported` comes LAST so a caller
-    // cannot override it.
     return {
-      getDocument: (params: PdfGetDocumentParams): PdfLoadingTask =>
-        getDocument({ ...params, isEvalSupported: false }),
+      getDocument: (params: PdfGetDocumentParams): PdfLoadingTask => {
+        // Supplying a worker leaves task._worker unset: this wrapper is
+        // its sole owner. A caller cannot replace it or re-enable eval.
+        const worker = new PDFWorker({});
+        let task: ReturnType<typeof getDocument>;
+        try {
+          task = getDocument({ ...params, worker, isEvalSupported: false });
+        } catch (error) {
+          // Cannot await here: PDF.js stops a starting thread on its first reply.
+          worker.destroy();
+          // That stop rejects `worker.promise` with nobody listening: keep
+          // the caller's error the only one reported.
+          void worker.promise.catch(() => undefined);
+          throw error;
+        }
+        return {
+          promise: task.promise,
+          async destroy() {
+            try {
+              await task.destroy();
+            } finally {
+              // Release the worker even if transport teardown rejects;
+              // the original rejection propagates after this finally.
+              worker.destroy();
+              // In 3.11, destroy during startup only marks the worker.
+              // Its first reply/error terminates the thread, THEN rejects
+              // this promise. A ready worker was terminated synchronously.
+              await worker.promise.catch(() => undefined);
+            }
+          },
+        };
+      },
     };
   })().catch((err) => {
     // Don't memoise a failure — allow a later retry to re-import.

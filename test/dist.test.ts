@@ -30,6 +30,6 @@ describe("the built dist/index.js", () => {
   });
 
   it("forces isEvalSupported to false after the caller's options", () => {
-    expect(src).toMatch(/\.\.\.params,\s*isEvalSupported:\s*false/);
+    expect(src).toMatch(/\.\.\.params,\s*worker,\s*isEvalSupported:\s*false\s*[,}]/);
   });
 });

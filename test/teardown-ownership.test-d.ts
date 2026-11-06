@@ -8,12 +8,12 @@
  * this file is picked up by `tsc --noEmit` (via `npm run typecheck`,
  * itself part of `npm run check`) rather than by vitest.
  *
- * The rule: `PdfLoadingTask.destroy()` "aborts all network requests and
- * destroys the worker" (v3.11.174 `api.d.ts`). The real
- * `PDFDocumentProxy` ALSO exposes a `destroy` that terminates the same
- * worker. Two callable teardowns for one resource is two chances to
- * release it twice, or to believe it released when it did not — so
- * `PdfDocument` omits it and `doc.destroy()` becomes a compile error.
+ * The rule: the `PdfLoadingTask` wrapper owns teardown of the underlying
+ * loading task AND its dedicated worker. The real
+ * `PDFDocumentProxy.destroy()` delegates to the underlying loading task,
+ * which skips a supplied worker: that path would leave our worker running.
+ * `PdfDocument` omits `destroy` so the wrapper stays the only teardown
+ * path and `doc.destroy()` becomes a compile error.
  */
 import type { PdfDocument, PdfLoadingTask } from "../src/index.js";
 

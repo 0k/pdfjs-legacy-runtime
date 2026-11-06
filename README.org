@@ -91,6 +91,19 @@ await task.destroy();                     // the ONLY teardown: network + worker
   ~disableAutoFetch~ and ~disableStream~ as above: PDF.js then fetches
   the cross-reference table and the pages shown, not the whole body.
 
+Each document gets its own dedicated worker from
+~GlobalWorkerOptions.workerSrc~; ~GlobalWorkerOptions.workerPort~ is not
+used. The returned loading task is a wrapper exposing only the typed
+~promise~ and ~destroy()~. Untyped PDF.js members reached through casts,
+such as ~onProgress~, ~onPassword~ and ~docId~, are not available.
+
+The loading task's ~destroy()~ resolves only
+once the worker thread has stopped, including when cancelled during
+startup. Consumers that await it before loading another document do not
+overlap workers. If transport teardown fails, the worker is still
+destroyed and awaited before ~destroy()~ rejects with the original error.
+A worker script that never loads nor errors keeps ~destroy()~ pending.
+
 * API
 
 | Export                          | What it is                                                                 |
