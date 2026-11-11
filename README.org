@@ -104,6 +104,16 @@ overlap workers. If transport teardown fails, the worker is still
 destroyed and awaited before ~destroy()~ rejects with the original error.
 A worker script that never loads nor errors keeps ~destroy()~ pending.
 
+If PDF.js rejects the document parameters (for example, an empty or invalid
+URL), ~getDocument()~ does not throw synchronously: it returns a loading
+task whose ~promise~ rejects with PDF.js's error message. An invalid URL
+starts no worker, and the task's ~destroy()~ resolves immediately. For other
+synchronous PDF.js failures, the worker is destroyed immediately; await
+~destroy()~ until its startup has settled and its thread has stopped.
+Repeated ~destroy()~ calls are safe. Leaving this failed task's ~promise~
+unread does not produce an unhandled rejection; awaiting it still rejects
+normally.
+
 * API
 
 | Export                          | What it is                                                                 |

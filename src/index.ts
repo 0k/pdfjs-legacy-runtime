@@ -137,6 +137,10 @@ export interface PdfRuntime {
   /**
    * Start loading a document. The caller's options are forwarded with
    * `isEvalSupported: false` added (see the module documentation).
+   * Invalid URLs reject the returned task's `promise` with PDF.js's error
+   * message without throwing synchronously or starting a worker. Other
+   * synchronous PDF.js errors also reject the task; worker teardown starts
+   * immediately, and `destroy()` waits for the thread to stop.
    */
   getDocument(params: PdfGetDocumentParams): PdfLoadingTask;
 }
@@ -188,6 +192,29 @@ export function loadPdfRuntime(): Promise<PdfRuntime> {
     GlobalWorkerOptions.workerSrc = workerUrl;
     return {
       getDocument: (params: PdfGetDocumentParams): PdfLoadingTask => {
+        try {
+          // Mirror 3.11.174's URL-only parameter checks before starting a worker.
+          if (!params.url) {
+            throw new Error("Invalid parameter object: need either .data, .range or .url");
+          }
+          // In Node PDF.js takes any non-empty string as a path, even with a
+          // test DOM's `window`: use its own Node test (pdf.js `isNodeJS`).
+          const isNodeJS = typeof process === "object" && process + "" === "[object process]"
+            && !process.versions.nw
+            && !(process.versions.electron && (process as { type?: string }).type
+              && (process as { type?: string }).type !== "browser");
+          if (!isNodeJS) {
+            try {
+              new URL(params.url, window.location.href);
+            } catch {
+              throw new Error("Invalid PDF url data: either string or URL-object is expected in the url property.");
+            }
+          }
+        } catch (error) {
+          const promise = Promise.reject<PdfDocument>(error);
+          void promise.catch(() => undefined);
+          return { promise, destroy: () => Promise.resolve() };
+        }
         // Supplying a worker leaves task._worker unset: this wrapper is
         // its sole owner. A caller cannot replace it or re-enable eval.
         const worker = new PDFWorker({});
@@ -195,12 +222,14 @@ export function loadPdfRuntime(): Promise<PdfRuntime> {
         try {
           task = getDocument({ ...params, worker, isEvalSupported: false });
         } catch (error) {
-          // Cannot await here: PDF.js stops a starting thread on its first reply.
+          // Safety net for other synchronous PDF.js failures after validation.
+          // Stop ASAP; PDF.js stops a starting thread on its first reply.
           worker.destroy();
-          // That stop rejects `worker.promise` with nobody listening: keep
-          // the caller's error the only one reported.
-          void worker.promise.catch(() => undefined);
-          throw error;
+          const stopped = worker.promise.catch(() => undefined);
+          const promise = Promise.reject<PdfDocument>(error);
+          // Mark it handled without changing the rejection callers receive.
+          void promise.catch(() => undefined);
+          return { promise, destroy: () => stopped };
         }
         return {
           promise: task.promise,
